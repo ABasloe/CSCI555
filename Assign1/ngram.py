@@ -1,4 +1,4 @@
-﻿import argparse
+﻿import argparse #imports needed
 import json
 import math
 import random
@@ -7,8 +7,12 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 
-UNK = "<UNK>"
+OOV = "<OOV>"
 BOS = "<s>"
+
+
+def default_data_path(filename: str) -> Path: #setting the path for the test.txt file
+    return Path(__file__).resolve().parent / filename
 
 
 class NGramModel:
@@ -20,43 +24,43 @@ class NGramModel:
 
         self.n = n
         self.alpha = alpha
-        self.context_counts: Counter[Tuple[str, ...]] = Counter()
-        self.ngram_counts: Counter[Tuple[str, ...]] = Counter()
-        self.vocab: set[str] = set()
-        self._argmax_cache: Dict[Tuple[str, ...], Tuple[str, float]] = {}
+        self.context_counts: Counter[Tuple[str, ...]] = Counter() #(n-1) token
+        self.ngram_counts: Counter[Tuple[str, ...]] = Counter() #full ngram count
+        self.vocab: set[str] = set() #the set of every token the model knows
+        self._argmax_cache: Dict[Tuple[str, ...], Tuple[str, float]] = {} #current best token
 
-    def _pad_context(self, prev_tokens: Sequence[str]) -> Tuple[str, ...]:
+    def _pad_context(self, prev_tokens: Sequence[str]) -> Tuple[str, ...]: #add pad empty tokens to ensure the context window is always length of n-1
         need = self.n - 1
         if len(prev_tokens) >= need:
             return tuple(prev_tokens[-need:])
         return tuple([BOS] * (need - len(prev_tokens)) + list(prev_tokens))
 
-    def fit(self, methods: List[List[str]], vocab: set[str]) -> None:
+    def fit(self, methods: List[List[str]], vocab: set[str]) -> None: #if the word isn't present in the vocab its out of vocab (oov)
         self.vocab = set(vocab)
-        self.vocab.add(UNK)
+        self.vocab.add(OOV)
 
         for method in methods:
-            mapped = [tok if tok in self.vocab else UNK for tok in method]
+            mapped = [tok if tok in self.vocab else OOV for tok in method]
             for i, token in enumerate(mapped):
                 context = self._pad_context(mapped[:i])
                 self.context_counts[context] += 1
                 self.ngram_counts[context + (token,)] += 1
 
-    def probability(self, context: Sequence[str], token: str) -> float:
+    def probability(self, context: Sequence[str], token: str) -> float: #uses the formula from assignment to compute the smoothed probability
         if token not in self.vocab:
-            token = UNK
+            token = OOV
         ctx = self._pad_context(context)
         count_ctx = self.context_counts[ctx]
         count_ng = self.ngram_counts[ctx + (token,)]
         v = len(self.vocab)
         return (count_ng + self.alpha) / (count_ctx + self.alpha * v)
 
-    def predict_next(self, context: Sequence[str]) -> Tuple[str, float]:
+    def predict_next(self, context: Sequence[str]) -> Tuple[str, float]: #of the next possible token it selects the one with the highest probability.
         ctx = self._pad_context(context)
         if ctx in self._argmax_cache:
             return self._argmax_cache[ctx]
 
-        best_token = UNK
+        best_token = OOV
         best_prob = -1.0
         for tok in self.vocab:
             p = self.probability(ctx, tok)
@@ -91,7 +95,7 @@ def read_tokenized_methods(path: Path, min_tokens: int = 10, dedup: bool = True)
 
 
 
-def split_dataset(
+def split_dataset( #makes the validation, test, and 3 training sets based on the values they are in the data set
     methods: List[List[str]],
     val_size: int = 1000,
     test_size: int = 1000,
@@ -122,7 +126,7 @@ def split_dataset(
 
 
 
-def build_vocab(methods: List[List[str]]) -> set[str]:
+def build_vocab(methods: List[List[str]]) -> set[str]: 
     vocab = set()
     for m in methods:
         vocab.update(m)
@@ -133,12 +137,12 @@ def build_vocab(methods: List[List[str]]) -> set[str]:
 def map_oov(methods: List[List[str]], vocab: set[str]) -> List[List[str]]:
     mapped = []
     for m in methods:
-        mapped.append([tok if tok in vocab else UNK for tok in m])
+        mapped.append([tok if tok in vocab else OOV for tok in m])
     return mapped
 
 
 
-def perplexity(model: NGramModel, methods: List[List[str]]) -> float:
+def perplexity(model: NGramModel, methods: List[List[str]]) -> float: #for each run through compute the perplexity is calculated based on the ground truth and probabilities calculated
     total_log_prob = 0.0
     total_tokens = 0
 
@@ -174,7 +178,7 @@ def build_predictions_for_method(model: NGramModel, method_tokens: List[str]) ->
 
 
 
-def write_results_json(
+def write_results_json( #based on the assignment make the results json file outlines. Give the information from the test sets to the files.
     out_path: Path,
     test_set_name: str,
     model: NGramModel,
@@ -206,9 +210,11 @@ def train_and_select(
     best_model = None
     best_meta = None
 
-    for train_name in ["T1", "T2", "T3"]:
+    for train_name in ["T1", "T2", "T3"]: #for each of the training sets go through their given set of methods and buid the vocabulary.
+                                          #also map all of the oov words together. Then for each of the n's (3, 5, 7) train an 
+                                          #N gram model and compute the perplexity for said model. 
         train_set = splits[train_name]
-        vocab = build_vocab(train_set)
+        vocab = build_vocab(train_set) 
 
         val_set = map_oov(splits["V"], vocab)
         train_mapped = map_oov(train_set, vocab)
@@ -226,7 +232,8 @@ def train_and_select(
                 "val_perplexity": val_ppl,
             }
 
-            if best_meta is None or val_ppl < best_meta["val_perplexity"]:
+            if best_meta is None or val_ppl < best_meta["val_perplexity"]: #if the perplexity happens to be lower then the current best model
+                                                                            #make it the new best model.
                 best_meta = meta
                 best_model = model
 
@@ -244,17 +251,26 @@ def train_and_select(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="N-gram code token model for Java methods")
-    parser.add_argument("--methods", type=Path, default=Path("methods.txt"), help="Tokenized methods file")
+    parser.add_argument("--methods", type=Path, default=default_data_path("methods.txt"), help="Tokenized methods file")
     parser.add_argument("--provided-test", type=Path, default=None, help="Optional provided test .txt")
+    parser.add_argument("--second-test", type=Path, default=None, help="Optional second test set .txt")
     parser.add_argument("--self-test", type=Path, default=None, help="Optional self-created test .txt")
     parser.add_argument("--min-tokens", type=int, default=10)
     parser.add_argument("--val-size", type=int, default=1000)
     parser.add_argument("--test-size", type=int, default=1000)
+    parser.add_argument("--t1-cap", type=int, default=15000)
+    parser.add_argument("--t2-cap", type=int, default=25000)
+    parser.add_argument("--t3-cap", type=int, default=35000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--alpha", type=float, default=0.1)
     parser.add_argument("--n-values", type=int, nargs="+", default=[3, 5, 7])
-    parser.add_argument("--out-dir", type=Path, default=Path("."))
+    parser.add_argument("--out-dir", type=Path, default=default_data_path("."))
     args = parser.parse_args()
+
+    if args.second_test is None:
+        inferred_second_test = default_data_path("test.txt")
+        if inferred_second_test.exists():
+            args.second_test = inferred_second_test
 
     methods = read_tokenized_methods(args.methods, min_tokens=args.min_tokens, dedup=True)
     print(f"Loaded {len(methods)} cleaned methods from {args.methods}")
@@ -263,6 +279,9 @@ def main() -> None:
         methods,
         val_size=args.val_size,
         test_size=args.test_size,
+        t1_cap=args.t1_cap,
+        t2_cap=args.t2_cap,
+        t3_cap=args.t3_cap,
         seed=args.seed,
     )
 
@@ -274,12 +293,12 @@ def main() -> None:
     best_train_vocab = build_vocab(splits[best_meta["train_set"]])
     split_test = map_oov(splits["Te"], best_train_vocab)
     write_results_json(
-        out_path=args.out_dir / "results-split-test.json",
+        out_path=args.out_dir / "results-yyyy.json",
         test_set_name="split_test",
         model=best_model,
         methods=split_test,
     )
-    print(f"Wrote {args.out_dir / 'results-split-test.json'}")
+    print(f"Wrote {args.out_dir / 'results-yyyy.json'}")
 
     if args.provided_test is not None:
         provided = read_tokenized_methods(args.provided_test, min_tokens=args.min_tokens, dedup=False)
@@ -291,6 +310,17 @@ def main() -> None:
             methods=provided,
         )
         print(f"Wrote {args.out_dir / 'results-provided.json'}")
+
+    if args.second_test is not None:
+        second = read_tokenized_methods(args.second_test, min_tokens=args.min_tokens, dedup=False)
+        second = map_oov(second, best_train_vocab)
+        write_results_json(
+            out_path=args.out_dir / "results-xxxx.json",
+            test_set_name=str(args.second_test.name),
+            model=best_model,
+            methods=second,
+        )
+        print(f"Wrote {args.out_dir / 'results-xxxx.json'}")
 
     if args.self_test is not None:
         self_test = read_tokenized_methods(args.self_test, min_tokens=args.min_tokens, dedup=False)
