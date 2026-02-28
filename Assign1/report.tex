@@ -1,0 +1,255 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{float}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue
+}
+
+\newcommand{\repoURL}{https://github.com/ABasloe/CSCI555}
+
+\title{Recommending Code Tokens via N-gram Models}
+\author{Aidan Basloe \\ CSCI 555: GenAI for SD}
+\date{2/23/26}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report presents an N-gram language model for next-token prediction over tokenized Java methods. The implementation loads a corpus of tokenized methods, applies assignment-required cleaning, builds separate vocabularies for capped training sets, trains smoothed N-gram models for \(n \in \{3,5,7\}\), and selects the best configuration using validation perplexity. The final system uses add-\(\alpha\) smoothing with \(\alpha = 0.1\) and outputs predictions in the required JSON format. In the current project, the best configuration is a 3-gram model trained on the largest training split \(T_3\). That model achieved validation perplexity \(1488.01\), split-test perplexity \(1310.70\), and external test perplexity \(1671.26\).
+\end{abstract}
+
+\section{Introduction}
+The goal of this assignment is to build a probabilistic code language model that predicts the next token in a Java method given the previous \(n-1\) tokens. The assignment requires training models for \(n \in \{3,5,7\}\), handling unseen N-grams with smoothing, evaluating with perplexity, and generating JSON output files containing token-level predictions.
+
+This project implements the complete pipeline in \texttt{Assign1/ngram.py}. The script loads tokenized Java methods, applies the required filtering, creates training/validation/test splits, trains multiple N-gram models, selects the best configuration on the validation set, and writes test predictions in the required JSON format. The main code is located at \href{\repoURL/blob/main/Assign1/ngram.py}{\texttt{Assign1/ngram.py}} and the usage notes are in \href{\repoURL/blob/main/Assign1/README.md}{\texttt{Assign1/README.md}}. The main assignment directory is available at \href{\repoURL/tree/main/Assign1}{\texttt{Assign1/}}.
+
+\section{Data Mining and Preparation}
+
+\subsection{Data Sources}
+The repository currently uses two tokenized Java-method files:
+\begin{itemize}[leftmargin=*]
+  \item \texttt{Assign1/methods.txt}: the main corpus used to build the training, validation, and split-based test sets.
+  \item \texttt{Assign1/test.txt}: a second held-out test set used for external evaluation.
+\end{itemize}
+
+Each line contains one tokenized Java method, represented as a sequence of space-separated tokens. This directly matches the input format required by the assignment.
+
+\subsection{Repository Mining Procedure}
+The method corpus was constructed from GitHub repositories before running the N-gram pipeline. The collection procedure was:
+\begin{enumerate}[leftmargin=*]
+  \item clone 700 Java GitHub repositories,
+  \item require candidate repositories to have at least 1000 stars and more than 5 contributors,
+  \item exclude repositories tagged as AI-generated,
+  \item sample up to 20 \texttt{.java} files per repository,
+  \item filter files and methods based on token-count thresholds, including a maximum length of 850 tokens,
+  \item remove non-ASCII content,
+  \item tokenize the remaining methods and save them as space-separated token sequences.
+\end{enumerate}
+
+This procedure was intended to favor popular, collaborative Java repositories while excluding obviously low-quality or non-representative sources.
+
+\subsection{Cleaning and Filtering}
+The data loading and cleaning logic is implemented in \texttt{read\_tokenized\_methods()} in \href{\repoURL/blob/main/Assign1/ngram.py}{\texttt{Assign1/ngram.py}}. The preprocessing steps are:
+\begin{enumerate}[leftmargin=*]
+  \item read one method per line,
+  \item remove non-ASCII characters,
+  \item trim whitespace,
+  \item split on whitespace to obtain tokens,
+  \item discard methods with fewer than 10 tokens,
+  \item remove duplicates when building the main corpus from \texttt{methods.txt}.
+\end{enumerate}
+
+In addition to the method-level filtering visible in the code, the upstream mining process also applied token-count filters during corpus construction, including removal of very small inputs and filtering out methods longer than 850 tokens. Together, these steps match the assignment requirements of non-ASCII filtering, minimum token-length filtering, and duplicate removal while also reducing extreme outliers.
+
+\subsection{Observed Corpus Statistics}
+The current project files contain the following data:
+\begin{itemize}[leftmargin=*]
+  \item \texttt{Assign1/methods.txt}: 168,350 raw lines.
+  \item After ASCII cleaning and the \(\geq 10\)-token filter: 84,177 methods.
+  \item After deduplication: 84,176 methods.
+  \item \texttt{Assign1/test.txt}: 1,000 raw lines, all of which remain after ASCII cleaning and satisfy the \(\geq 10\)-token threshold.
+\end{itemize}
+
+The average method length in \texttt{methods.txt} before filtering is 28.07 tokens, with a minimum of 1 and a maximum of 746. The average method length in \texttt{test.txt} is 50.42 tokens, with a minimum of 10 and a maximum of 1408.
+
+\subsection{Dataset Splits}
+Dataset splitting is implemented in \texttt{split\_dataset()} in \href{\repoURL/blob/main/Assign1/ngram.py}{\texttt{Assign1/ngram.py}}. The script constructs:
+\begin{itemize}[leftmargin=*]
+  \item one validation set \(V\),
+  \item one split-based test set \(Te\),
+  \item three capped training sets \(T_1\), \(T_2\), and \(T_3\).
+\end{itemize}
+
+The training caps follow the assignment:
+\[
+|T_1| \leq 15000,\quad |T_2| \leq 25000,\quad |T_3| \leq 35000.
+\]
+
+For the final rerun used in this report, the split sizes were:
+\begin{itemize}[leftmargin=*]
+  \item \(V = 1000\) methods,
+  \item \(Te = 1000\) methods,
+  \item \(T_1 = 15000\),
+  \item \(T_2 = 25000\),
+  \item \(T_3 = 35000\).
+\end{itemize}
+
+The random seed was fixed to 42.
+
+\subsection{Data Mining Note}
+The current repository code starts from pre-tokenized method files, while the earlier repository-mining stage was performed upstream during corpus construction. The report now documents that earlier process: 700 repositories were cloned, repositories were filtered by popularity and collaboration signals, up to 20 Java files per repository were selected, and token-based and ASCII-based filters were applied before saving the final tokenized methods. The code in this repository therefore covers the downstream modeling and evaluation stages, while this section documents the upstream data-collection stage.
+
+\section{Model Training Procedure}
+
+\subsection{N-gram Language Model}
+The N-gram model is implemented in the \texttt{NGramModel} class in \href{\repoURL/blob/main/Assign1/ngram.py}{\texttt{Assign1/ngram.py}}. For each token position, the model uses the previous \(n-1\) tokens as context and estimates the conditional probability of the next token. Short contexts at the beginning of a method are left-padded with the begin-of-sequence token \texttt{<s>}.
+
+\subsection{Vocabulary and OOV Handling}
+A separate vocabulary is built for each training split using \texttt{build\_vocab()}. Tokens not observed in the selected training vocabulary are mapped to the special token \texttt{<OOV>} in validation and test data through \texttt{map\_oov()}. This prevents information leakage from validation and test data into the training vocabulary and matches the assignment requirement to build each vocabulary from scratch using only the corresponding training set.
+
+\subsection{Smoothing}
+To avoid zero probabilities for unseen N-grams, the implementation uses add-\(\alpha\) smoothing in \texttt{probability()}:
+\[
+P(t \mid c) = \frac{\text{Count}(c,t) + \alpha}{\text{Count}(c) + \alpha |V|}.
+\]
+
+In the current implementation:
+\begin{itemize}[leftmargin=*]
+  \item \(\alpha = 0.1\),
+  \item \(|V|\) is the size of the training vocabulary plus \texttt{<OOV>}.
+\end{itemize}
+
+This guarantees non-zero probabilities and allows perplexity to be computed safely on all evaluation sets.
+
+\subsection{Model Selection Procedure}
+Model selection is implemented in \texttt{train\_and\_select()}. The script evaluates every combination of:
+\begin{itemize}[leftmargin=*]
+  \item training set in \(\{T_1, T_2, T_3\}\),
+  \item context size \(n \in \{3,5,7\}\).
+\end{itemize}
+
+For each configuration, the script:
+\begin{enumerate}[leftmargin=*]
+  \item builds the training vocabulary,
+  \item maps validation methods to that vocabulary using \texttt{<OOV>},
+  \item trains the N-gram model,
+  \item computes validation perplexity,
+  \item keeps the model with the lowest validation perplexity.
+\end{enumerate}
+
+\section{Evaluation Setup}
+
+\subsection{Perplexity}
+Perplexity is computed in \texttt{perplexity()} in \href{\repoURL/blob/main/Assign1/ngram.py}{\texttt{Assign1/ngram.py}}. For each token, the implementation uses the probability assigned to the ground-truth next token, not the probability of the model's argmax prediction. This matches the assignment definition:
+\[
+\text{PPL}(W) = \exp\left(-\frac{1}{N}\sum_{i=1}^{N}\log P(w_i \mid w_1,\dots,w_{i-1})\right).
+\]
+
+\subsection{JSON Output Format}
+Result generation is implemented in \texttt{write\_results\_json()} and \texttt{build\_predictions\_for\_method()}. Each JSON file contains:
+\begin{itemize}[leftmargin=*]
+  \item the test set name,
+  \item overall perplexity,
+  \item one entry per method,
+  \item the context window,
+  \item token-level predictions containing the context, predicted token, predicted probability, and ground-truth token.
+\end{itemize}
+
+The final rerun generated:
+\begin{itemize}[leftmargin=*]
+  \item \texttt{Assign1/results-yyyy.json} for the split-based test set,
+  \item \texttt{Assign1/results-xxxx.json} for \texttt{Assign1/test.txt}.
+\end{itemize}
+
+Both files now contain 1,000 methods, which fixes the earlier stale output issue where one JSON file only contained 20 methods from an older run.
+
+\section{Results}
+
+\subsection{Validation Results}
+Table~\ref{tab:val-results} reports validation perplexity for every training-size and context-window combination.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+Training Set & \(n=3\) & \(n=5\) & \(n=7\) \\
+\midrule
+\(T_1\) & 1610.37 & 10500.69 & 20380.13 \\
+\(T_2\) & 1582.07 & 11494.66 & 24200.00 \\
+\(T_3\) & 1488.01 & 11376.48 & 25354.21 \\
+\bottomrule
+\end{tabular}
+\caption{Validation perplexity for all tested configurations.}
+\label{tab:val-results}
+\end{table}
+
+The best configuration was:
+\begin{itemize}[leftmargin=*]
+  \item training set: \(T_3\),
+  \item context size: \(n=3\),
+  \item smoothing: add-\(\alpha\) with \(\alpha = 0.1\),
+  \item vocabulary size: 100,666,
+  \item validation perplexity: 1488.006546.
+\end{itemize}
+
+\subsection{Final Test Results}
+Table~\ref{tab:test-results} summarizes the final test results from the corrected JSON outputs.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Output File & Test Set & Perplexity \\
+\midrule
+\texttt{results-yyyy.json} & \texttt{split\_test} & 1310.704973 \\
+\texttt{results-xxxx.json} & \texttt{test.txt} & 1671.260503 \\
+\bottomrule
+\end{tabular}
+\caption{Perplexity on the two 1,000-method evaluation sets.}
+\label{tab:test-results}
+\end{table}
+
+The split-based test set produced lower perplexity than the external \texttt{test.txt} set, which suggests that the external test set is somewhat harder for the selected model. This is reasonable because the external set may contain more out-of-vocabulary identifiers or token sequences that are less frequent in the main training corpus.
+
+\subsection{Interpretation}
+The strongest result in Table~\ref{tab:val-results} is that the 3-gram model outperformed the 5-gram and 7-gram models for every training size. This indicates that data sparsity dominated the benefits of longer context windows in the current corpus. Although a 5-gram or 7-gram model has access to more prior tokens, those longer histories are much rarer in count-based models, so the estimates become weak even with smoothing.
+
+Training size also mattered. For the 3-gram setting, validation perplexity improved from 1610.37 on \(T_1\) to 1488.01 on \(T_3\). This shows that larger training data improved the reliability of N-gram counts, especially for the lower-order model that was already less sparse.
+
+The final test results also make sense after rerunning the pipeline consistently. The earlier mismatch between validation and test perplexity was due to stale JSON outputs from an older run. After regenerating both result files with the corrected 1,000-method test size, the numbers are consistent with the selected 3-gram model and no longer indicate a pipeline error.
+
+\section{Implementation Note}
+During finalization, JSON generation was optimized so that next-token prediction does not scan the full vocabulary for every context. Under add-\(\alpha\) smoothing, for a fixed context the denominator is constant, so the highest-probability token is the token with the highest continuation count for that context. The code now caches the best continuation during training, which preserves model behavior while making it feasible to generate prediction JSON files for all 1,000 methods in each test set.
+
+\section{Threats to Validity}
+The main threats to validity are the following:
+\begin{itemize}[leftmargin=*]
+  \item The repository currently starts from pre-tokenized method files, so although the upstream mining process is described in this report, it is not fully implemented in the code shown here.
+  \item Only one smoothing hyperparameter was used in the final implementation (\(\alpha = 0.1\)); additional tuning could change the relative performance of different \(n\) values.
+  \item The external test set may not have exactly the same distribution as the main corpus in \texttt{methods.txt}, which can affect perplexity independently of model quality.
+\end{itemize}
+
+\section{Conclusion}
+This project implemented a complete N-gram pipeline for Java code completion over tokenized methods. The system performs assignment-required cleaning, splitting, vocabulary construction, out-of-vocabulary handling, smoothing, validation-based model selection, perplexity computation, and JSON generation. Among all tested configurations, the best model was a 3-gram trained on the largest training set \(T_3\) with add-\(\alpha\) smoothing and \(\alpha = 0.1\). It achieved validation perplexity 1488.01, split-test perplexity 1310.70, and external test perplexity 1671.26. Overall, the results show that in this corpus a lower-order N-gram model is more effective than longer-context N-gram models, mainly because it is less affected by sparsity.
+
+\section*{Repository Links}
+The main links for this project are:
+\begin{itemize}[leftmargin=*]
+  \item Assignment page: \href{\repoURL/tree/main/Assign1}{\texttt{Assign1/}}
+  \item Code: \href{\repoURL/blob/main/Assign1/ngram.py}{\texttt{Assign1/ngram.py}}
+  \item README: \href{\repoURL/blob/main/Assign1/README.md}{\texttt{Assign1/README.md}}
+  \item Main corpus: \href{\repoURL/blob/main/Assign1/methods.txt}{\texttt{Assign1/methods.txt}}
+  \item External test set: \href{\repoURL/blob/main/Assign1/test.txt}{\texttt{Assign1/test.txt}}
+\end{itemize}
+
+\end{document}

@@ -28,6 +28,7 @@ class NGramModel:
         self.ngram_counts: Counter[Tuple[str, ...]] = Counter() #full ngram count
         self.vocab: set[str] = set() #the set of every token the model knows
         self._argmax_cache: Dict[Tuple[str, ...], Tuple[str, float]] = {} #current best token
+        self._best_token_by_context: Dict[Tuple[str, ...], str] = {}
 
     def _pad_context(self, prev_tokens: Sequence[str]) -> Tuple[str, ...]: #add pad empty tokens to ensure the context window is always length of n-1
         need = self.n - 1
@@ -44,7 +45,20 @@ class NGramModel:
             for i, token in enumerate(mapped):
                 context = self._pad_context(mapped[:i])
                 self.context_counts[context] += 1
-                self.ngram_counts[context + (token,)] += 1
+                ngram = context + (token,)
+                self.ngram_counts[ngram] += 1
+
+                current_best = self._best_token_by_context.get(context)
+                if current_best is None:
+                    self._best_token_by_context[context] = token
+                    continue
+
+                current_best_count = self.ngram_counts[context + (current_best,)]
+                new_count = self.ngram_counts[ngram]
+                if new_count > current_best_count or (
+                    new_count == current_best_count and token < current_best
+                ):
+                    self._best_token_by_context[context] = token
 
     def probability(self, context: Sequence[str], token: str) -> float: #uses the formula from assignment to compute the smoothed probability
         if token not in self.vocab:
@@ -60,13 +74,11 @@ class NGramModel:
         if ctx in self._argmax_cache:
             return self._argmax_cache[ctx]
 
-        best_token = OOV
-        best_prob = -1.0
-        for tok in self.vocab:
-            p = self.probability(ctx, tok)
-            if p > best_prob:
-                best_prob = p
-                best_token = tok
+        # With add-alpha smoothing, the denominator is constant for a fixed
+        # context, so the highest-probability token is the continuation with
+        # the largest count for that context.
+        best_token = self._best_token_by_context.get(ctx, OOV)
+        best_prob = self.probability(ctx, best_token)
 
         self._argmax_cache[ctx] = (best_token, best_prob)
         return best_token, best_prob
